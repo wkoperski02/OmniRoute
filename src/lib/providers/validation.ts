@@ -68,6 +68,7 @@ import {
 } from "@omniroute/open-sse/config/runway.ts";
 import { PETALS_DEFAULT_MODEL, normalizePetalsBaseUrl } from "@omniroute/open-sse/config/petals.ts";
 import { signAwsRequest } from "@omniroute/open-sse/utils/awsSigV4.ts";
+import { validateImageProviderApiKey } from "@/lib/providers/imageValidation";
 
 const OPENAI_LIKE_FORMATS = new Set(["openai", "openai-responses"]);
 const GEMINI_LIKE_FORMATS = new Set(["gemini", "gemini-cli"]);
@@ -672,34 +673,7 @@ async function validateAssemblyAIProvider({ apiKey, providerSpecificData = {} }:
 }
 
 async function validateNanoBananaProvider({ apiKey, providerSpecificData = {} }: any) {
-  try {
-    // NanoBanana doesn't expose a lightweight validation endpoint,
-    // so we send a minimal generate request that will succeed or fail on auth.
-    const response = await validationWrite(
-      "https://api.nanobananaapi.ai/api/v1/nanobanana/generate",
-      {
-        method: "POST",
-        headers: applyCustomUserAgent(
-          {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          providerSpecificData
-        ),
-        body: JSON.stringify({
-          prompt: "test",
-          model: "nanobanana-flash",
-        }),
-      }
-    );
-    // Auth errors → 401/403; anything else (even 400 bad request) means auth passed
-    if (response.status === 401 || response.status === 403) {
-      return { valid: false, error: "Invalid API key" };
-    }
-    return { valid: true, error: null };
-  } catch (error: any) {
-    return toValidationErrorResult(error);
-  }
+  return validateImageProviderApiKey({ provider: "nanobanana", apiKey, providerSpecificData });
 }
 
 async function validateElevenLabsProvider({ apiKey, providerSpecificData = {} }: any) {
@@ -2195,24 +2169,33 @@ const SEARCH_VALIDATOR_CONFIGS: Record<
       headers: { Accept: "application/json", "X-API-Key": apiKey },
     },
   }),
-  "searxng-search": (_apiKey, providerSpecificData = {}) => {
+  "searxng-search": (apiKey, providerSpecificData = {}) => {
     const baseUrl =
       typeof providerSpecificData?.baseUrl === "string" && providerSpecificData.baseUrl.trim()
         ? providerSpecificData.baseUrl.trim().replace(/\/+$/, "")
         : "http://localhost:8888/search";
     const searchUrl = baseUrl.endsWith("/search") ? baseUrl : `${baseUrl}/search`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+    }
     return {
       url: `${searchUrl}?q=test&format=json`,
       init: {
         method: "GET",
-        headers: { Accept: "application/json" },
+        headers,
       },
     };
   },
 };
 
-const META_AI_SEND_MESSAGE_DOC_ID = "078dfdff6fb0d420d8011b49073e6886";
-const META_AI_FRIENDLY_NAME = "useAbraSendMessageMutation";
+// See open-sse/executors/muse-spark-web.ts for the rationale: Meta migrated
+// from the "Abra" mutation (doc_id 078dfdff…, type RewriteOptionsInput now
+// missing from schema) to the "Ecto" subscription. POST graphql still
+// streams the response; only the persisted-query identifier and operation
+// shape changed.
+const META_AI_SEND_MESSAGE_DOC_ID = "29ae946c82d1f301196c6ca2226400b5";
+const META_AI_FRIENDLY_NAME = "useEctoSendMessageSubscription";
 const META_AI_REQUEST_ANALYTICS_TAGS = "graphservice";
 const META_AI_ASBD_ID = "129477";
 const META_AI_USER_AGENT =
@@ -2311,7 +2294,9 @@ function buildMetaAiValidationBody() {
       promptType: null,
       qplJoinId: null,
       requestedToolCall: null,
-      rewriteOptions: null,
+      // See muse-spark-web executor: RewriteOptionsInput was removed from
+      // Meta's schema; sending `rewriteOptions` (even null) breaks the
+      // persisted-query validation. Omit the field.
       turnId: crypto.randomUUID(),
       userAgent: META_AI_USER_AGENT,
       userEventId: generateMetaAiEventId(conversationId),
@@ -2352,14 +2337,14 @@ async function validateGrokWebProvider({ apiKey, providerSpecificData = {} }: an
           Origin: "https://grok.com",
           Pragma: "no-cache",
           Referer: "https://grok.com/",
-          "Sec-Ch-Ua": '"Google Chrome";v="136", "Chromium";v="136", "Not(A:Brand";v="24"',
+          "Sec-Ch-Ua": '"Google Chrome";v="147", "Chromium";v="147", "Not(A:Brand";v="24"',
           "Sec-Ch-Ua-Mobile": "?0",
           "Sec-Ch-Ua-Platform": '"macOS"',
           "Sec-Fetch-Dest": "empty",
           "Sec-Fetch-Mode": "cors",
           "Sec-Fetch-Site": "same-origin",
           "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
           "x-statsig-id": btoa(statsigMsg),
           "x-xai-request-id": crypto.randomUUID(),
           traceparent: `00-${traceId}-${spanId}-00`,
@@ -2368,8 +2353,7 @@ async function validateGrokWebProvider({ apiKey, providerSpecificData = {} }: an
       ),
       body: JSON.stringify({
         temporary: true,
-        modelName: "grok-4-1-thinking-1129",
-        modelMode: "MODEL_MODE_FAST",
+        modeId: "auto",
         message: "test",
         fileAttachments: [],
         imageAttachments: [],
@@ -2392,6 +2376,15 @@ async function validateGrokWebProvider({ apiKey, providerSpecificData = {} }: an
       }),
     });
 
+    if (response.ok) {
+      return { valid: true, error: null };
+    }
+
+    let errorDetail = "";
+    try {
+      errorDetail = (await response.text()).slice(0, 240);
+    } catch {}
+
     if (response.status === 401 || response.status === 403) {
       return {
         valid: false,
@@ -2399,16 +2392,18 @@ async function validateGrokWebProvider({ apiKey, providerSpecificData = {} }: an
       };
     }
 
-    // 200 or non-auth 4xx (e.g. 400, 429) means the cookie is accepted
-    if (response.ok || (response.status >= 400 && response.status < 500)) {
-      return { valid: true, error: null };
+    if (response.status === 429) {
+      return { valid: false, error: "Grok rate limited during validation (429)" };
     }
 
     if (response.status >= 500) {
       return { valid: false, error: `Grok unavailable (${response.status})` };
     }
 
-    return { valid: false, error: `Validation failed: ${response.status}` };
+    return {
+      valid: false,
+      error: `Grok validation failed (${response.status})${errorDetail ? `: ${errorDetail}` : ""}`,
+    };
   } catch (error: any) {
     return toValidationErrorResult(error);
   }
@@ -2504,7 +2499,7 @@ async function validateBlackboxWebProvider({ apiKey, providerSpecificData = {} }
         Origin: "https://app.blackbox.ai",
         Referer: "https://app.blackbox.ai/",
         "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
       },
       providerSpecificData
     );
@@ -2534,7 +2529,7 @@ async function validateBlackboxWebProvider({ apiKey, providerSpecificData = {} }
         Origin: "https://app.blackbox.ai",
         Referer: "https://app.blackbox.ai/",
         "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
       },
       providerSpecificData
     );
@@ -2608,7 +2603,7 @@ async function validateBlackboxWebProvider({ apiKey, providerSpecificData = {} }
 
 async function validateMuseSparkWebProvider({ apiKey, providerSpecificData = {} }: any) {
   try {
-    const cookieHeader = normalizeSessionCookieHeader(apiKey, "abra_sess");
+    const cookieHeader = normalizeSessionCookieHeader(apiKey, "ecto_1_sess");
     const response = await validationWrite("https://www.meta.ai/api/graphql", {
       method: "POST",
       headers: applyCustomUserAgent(
@@ -2701,6 +2696,16 @@ export async function validateProviderApiKey({ provider, apiKey, providerSpecifi
     deepgram: validateDeepgramProvider,
     assemblyai: validateAssemblyAIProvider,
     nanobanana: validateNanoBananaProvider,
+    "fal-ai": ({ apiKey, providerSpecificData }: any) =>
+      validateImageProviderApiKey({ provider: "fal-ai", apiKey, providerSpecificData }),
+    "stability-ai": ({ apiKey, providerSpecificData }: any) =>
+      validateImageProviderApiKey({ provider: "stability-ai", apiKey, providerSpecificData }),
+    "black-forest-labs": ({ apiKey, providerSpecificData }: any) =>
+      validateImageProviderApiKey({ provider: "black-forest-labs", apiKey, providerSpecificData }),
+    recraft: ({ apiKey, providerSpecificData }: any) =>
+      validateImageProviderApiKey({ provider: "recraft", apiKey, providerSpecificData }),
+    topaz: ({ apiKey, providerSpecificData }: any) =>
+      validateImageProviderApiKey({ provider: "topaz", apiKey, providerSpecificData }),
     elevenlabs: validateElevenLabsProvider,
     inworld: validateInworldProvider,
     "aws-polly": validateAwsPollyProvider,

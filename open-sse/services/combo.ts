@@ -40,16 +40,6 @@ import {
   getComboStepWeight,
   normalizeComboStep,
 } from "../../src/lib/combos/steps.ts";
-
-function isProviderBreakerOpenResponse(
-  result: Response,
-  errorBody?: { error?: { code?: string | null } } | null
-) {
-  return (
-    result.headers.get("x-omniroute-provider-breaker") === "open" ||
-    errorBody?.error?.code === "provider_circuit_open"
-  );
-}
 import {
   getConnectionRoutingTags,
   matchesRoutingTags,
@@ -59,58 +49,6 @@ import {
 
 // Status codes that should mark round-robin target semaphores as cooling down.
 const TRANSIENT_FOR_SEMAPHORE = [429, 502, 503, 504];
-const COMBO_BAD_REQUEST_FALLBACK_PATTERNS = [
-  /\bprohibited_content\b/i,
-  /request blocked by .*api/i,
-  /provided message roles? is not valid/i,
-  /unsupported .*message role/i,
-  /no such tool available/i,
-  /unsupported content part type/i,
-  /tool(?:_call|_use)? .* not (?:available|found)/i,
-  /third-party apps/i,
-  // Context overflow — model-specific, may succeed on a model with larger context window
-  /context overflow/i,
-  /context length exceeded/i,
-  /prompt too large/i,
-  /token limit/i,
-  /too many tokens/i,
-  /exceeds? context/i,
-  /maximum context/i,
-  /input too long/i,
-  /messages? exceed/i,
-  // Model not supported/found — permanent model-level error, try next combo target
-  /no provider supported/i,
-  /model not found/i,
-  /model not available/i,
-  /unsupported model/i,
-  /model.*has no provider/i,
-  // Function calling format error — model doesn't support this capability
-  /function\.?arguments.*(must be|should be|必须).*(json|JSON)/i,
-  /tool.*arguments.*invalid/i,
-  /function.*parameter.*(invalid|format)/i,
-  // Input length range error — model-specific context limit
-  /range of input length/i,
-  /input length should be/i,
-  // Transient 400 errors from upstream — should fallback to next combo target
-  /服务遇到了一点小状况/i, // ModelScope/Qwen transient error
-  /抱歉.*?敏感内容.*?请检查/i, // ModelScope/Qwen content moderation with context
-  /内容.*?敏感.*?(?:无法|过滤)/i, // Content sensitivity block
-  /无法响应.*?请求/i, // "unable to respond to request"
-  /稍后重试/i, // "retry later" in Chinese
-  /temporary.*error/i,
-  /transient.*error/i,
-  /service.*unavailable/i,
-  /please.*try.*again/i,
-  // Rate limit errors — some providers return 400 instead of 429
-  /\brate.?-?limit.?(?:exceeded|reached|hit)/i,
-  /too many requests/i,
-  /请求过于频繁/i, // Chinese rate limit message
-  // Tool call function name errors — model-specific, try next combo target
-  /\bfunction'?s? name (?:can't|can not|is|has) (?:blank|empty|missing)/i,
-  /function.*name.*(?:blank|empty|missing)/i,
-  /tool_call.*name.*(?:blank|empty|missing)/i,
-];
-
 // Patterns that signal all accounts for a provider are rate-limited / exhausted.
 // Used to detect 503 responses from handleNoCredentials so combo can fallback.
 const ALL_ACCOUNTS_RATE_LIMITED_PATTERNS = [/unavailable/i, /service temporarily unavailable/i];
@@ -255,7 +193,14 @@ async function validateResponseQuality(
     return { valid: false, reason: "empty content and no tool_calls in response" };
   }
 
-  return { valid: true };
+  return {
+    valid: true,
+    clonedResponse: new Response(text, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+  };
 }
 
 // In-memory atomic counter per combo for round-robin distribution
@@ -276,6 +221,13 @@ function normalizeModelEntry(entry) {
 function getTargetProvider(modelStr: string, providerId?: string | null): string {
   const parsed = parseModel(modelStr);
   return providerId || parsed.provider || parsed.providerAlias || "unknown";
+}
+
+function isStreamReadinessTimeoutErrorBody(errorBody: unknown): boolean {
+  if (!errorBody || typeof errorBody !== "object") return false;
+  const error = (errorBody as Record<string, unknown>).error;
+  if (!error || typeof error !== "object") return false;
+  return (error as Record<string, unknown>).code === "STREAM_READINESS_TIMEOUT";
 }
 
 function toRecordedTarget(target: ResolvedComboTarget) {
@@ -740,12 +692,6 @@ function extractPromptForIntent(body) {
   return "";
 }
 
-export function shouldFallbackComboBadRequest(status, errorText) {
-  if (status !== 400 || !errorText) return false;
-  const message = String(errorText);
-  return COMBO_BAD_REQUEST_FALLBACK_PATTERNS.some((pattern) => pattern.test(message));
-}
-
 function mapIntentToTaskType(intent) {
   switch (intent) {
     case "code":
@@ -1084,6 +1030,7 @@ export async function handleComboChat({
   settings,
   allCombos,
   relayOptions,
+  signal,
 }) {
   const strategy = combo.strategy || "priority";
   const relayConfig =
@@ -1283,6 +1230,7 @@ export async function handleComboChat({
       log,
       settings,
       allCombos,
+      signal,
     });
   }
 
@@ -1518,6 +1466,11 @@ export async function handleComboChat({
 
     // Retry loop for transient errors
     for (let retry = 0; retry <= maxRetries; retry++) {
+      // Fix #1681: Bail out immediately if the client has disconnected
+      if (signal?.aborted) {
+        log.info("COMBO", `Client disconnected — aborting combo loop before model ${modelStr}`);
+        return errorResponse(499, "Client disconnected");
+      }
       globalAttempts++;
       if (globalAttempts > MAX_GLOBAL_ATTEMPTS) {
         log.warn(
@@ -1531,7 +1484,21 @@ export async function handleComboChat({
           "COMBO",
           `Retrying ${modelStr} in ${retryDelayMs}ms (attempt ${retry + 1}/${maxRetries + 1})`
         );
-        await new Promise((r) => setTimeout(r, retryDelayMs));
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, retryDelayMs);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve(undefined);
+            },
+            { once: true }
+          );
+        });
+        if (signal?.aborted) {
+          log.info("COMBO", `Client disconnected during retry delay — aborting`);
+          return errorResponse(499, "Client disconnected");
+        }
       }
 
       log.info(
@@ -1545,6 +1512,7 @@ export async function handleComboChat({
       if (result.ok) {
         const quality = await validateResponseQuality(result, clientRequestedStream, log);
         if (!quality.valid) {
+          const qualityFailureReason = `Upstream response failed quality validation: ${quality.reason}`;
           log.warn(
             "COMBO",
             `Model ${modelStr} returned 200 but failed quality check: ${quality.reason}`
@@ -1557,6 +1525,10 @@ export async function handleComboChat({
             target: toRecordedTarget(target),
           });
           recordedAttempts++;
+          // Fix #1707: Set terminal state so the fallback doesn't emit
+          // misleading ALL_ACCOUNTS_INACTIVE when the real issue is quality.
+          lastError = `Upstream response failed quality validation: ${quality.reason}`;
+          if (!lastStatus) lastStatus = 502;
           if (i > 0) fallbackCount++;
           break; // move to next model
         }
@@ -1628,7 +1600,7 @@ export async function handleComboChat({
           }
         }
 
-        return result;
+        return quality.clonedResponse ?? result;
       }
 
       // Extract error info from response
@@ -1670,29 +1642,13 @@ export async function handleComboChat({
         }
       }
 
-      const providerBreakerOpen = isProviderBreakerOpenResponse(result, errorBody);
+      const isStreamReadinessTimeout =
+        result.status === 504 && isStreamReadinessTimeoutErrorBody(errorBody);
 
-      if (providerBreakerOpen) {
-        lastError = errorText || String(result.status);
-        if (!lastStatus) lastStatus = result.status;
-        if (i > 0) fallbackCount++;
-        log.info("COMBO", `Skipping ${modelStr}: provider circuit breaker OPEN for ${provider}`);
-        break;
-      }
-
-      const { shouldFallback, cooldownMs } = checkFallbackError(
-        result.status,
-        errorText,
-        0,
-        null,
-        provider,
-        result.headers,
-        profile
-      );
-      const comboBadRequestFallback = shouldFallbackComboBadRequest(result.status, errorText);
-
-      if (!shouldFallback && !comboBadRequestFallback) {
-        log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
+      // Fix #1681: Status 499 means client disconnected — stop combo loop immediately.
+      // There is no point trying fallback models when nobody is listening.
+      if (result.status === 499) {
+        log.info("COMBO", `Client disconnected (499) during ${modelStr} — stopping combo loop`);
         recordComboRequest(combo.name, modelStr, {
           success: false,
           latencyMs: Date.now() - startTime,
@@ -1704,15 +1660,23 @@ export async function handleComboChat({
         return result;
       }
 
-      if (comboBadRequestFallback) {
-        log.info(
-          "COMBO",
-          `Treating provider-scoped 400 from ${modelStr} as model-local failure; trying next combo target`
-        );
-      }
+      // Combo fallback is target-level orchestration: a non-ok target response is
+      // treated as local to that target and the combo continues to the next target.
+      // Error classification is retained only for retry/cooldown pacing; it must
+      // not decide whether fallback happens, including for generic 400 responses.
+      const { cooldownMs } = checkFallbackError(
+        result.status,
+        errorText,
+        0,
+        null,
+        provider,
+        result.headers,
+        profile
+      );
 
       // Check if this is a transient error worth retrying on same model
-      const isTransient = [408, 429, 500, 502, 503, 504].includes(result.status);
+      const isTransient =
+        !isStreamReadinessTimeout && [408, 429, 500, 502, 503, 504].includes(result.status);
       if (retry < maxRetries && isTransient) {
         continue; // Retry same model
       }
@@ -1737,7 +1701,21 @@ export async function handleComboChat({
           : 0;
       if ([502, 503, 504].includes(result.status) && fallbackWaitMs > 0) {
         log.info("COMBO", `Waiting ${fallbackWaitMs}ms before fallback to next model`);
-        await new Promise((r) => setTimeout(r, fallbackWaitMs));
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, fallbackWaitMs);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve(undefined);
+            },
+            { once: true }
+          );
+        });
+        if (signal?.aborted) {
+          log.info("COMBO", `Client disconnected during fallback wait — aborting`);
+          return errorResponse(499, "Client disconnected");
+        }
       }
 
       break; // Move to next model
@@ -1798,6 +1776,7 @@ async function handleRoundRobinCombo({
   log,
   settings,
   allCombos,
+  signal,
 }) {
   const config = settings
     ? resolveComboConfig(combo, settings)
@@ -1893,6 +1872,7 @@ async function handleRoundRobinCombo({
         if (result.ok) {
           const quality = await validateResponseQuality(result, clientRequestedStream, log);
           if (!quality.valid) {
+            const qualityFailureReason = `Upstream response failed quality validation: ${quality.reason}`;
             log.warn(
               "COMBO-RR",
               `${modelStr} returned 200 but failed quality check: ${quality.reason}`
@@ -1905,6 +1885,10 @@ async function handleRoundRobinCombo({
               target: toRecordedTarget(target),
             });
             recordedAttempts++;
+            // Fix #1707: Set terminal state so the fallback doesn't emit
+            // misleading ALL_ACCOUNTS_INACTIVE when the real issue is quality.
+            lastError = `Upstream response failed quality validation: ${quality.reason}`;
+            if (!lastStatus) lastStatus = 502;
             if (offset > 0) fallbackCount++;
             break; // move to next model
           }
@@ -1967,6 +1951,22 @@ async function handleRoundRobinCombo({
           /* Clone failed */
         }
 
+        if (result.status === 499) {
+          log.info(
+            "COMBO-RR",
+            `Client disconnected (499) during ${modelStr} — stopping combo loop`
+          );
+          recordComboRequest(combo.name, modelStr, {
+            success: false,
+            latencyMs: Date.now() - startTime,
+            fallbackCount,
+            strategy: "round-robin",
+            target: toRecordedTarget(target),
+          });
+          recordedAttempts++;
+          return result;
+        }
+
         if (
           retryAfter &&
           (!earliestRetryAfter || new Date(retryAfter) < new Date(earliestRetryAfter))
@@ -1982,18 +1982,14 @@ async function handleRoundRobinCombo({
           }
         }
 
-        if (isProviderBreakerOpenResponse(result, errorBody as Record<string, unknown> | null)) {
-          lastError = errorText || String(result.status);
-          if (!lastStatus) lastStatus = result.status;
-          if (offset > 0) fallbackCount++;
-          log.info(
-            "COMBO-RR",
-            `Skipping ${modelStr}: provider circuit breaker OPEN for ${provider}`
-          );
-          break;
-        }
+        const isStreamReadinessTimeout =
+          result.status === 504 && isStreamReadinessTimeoutErrorBody(errorBody);
 
-        const { shouldFallback, cooldownMs } = checkFallbackError(
+        // Round-robin uses the same target-level fallback rule as other combo
+        // strategies: non-ok target responses fall through to the next target.
+        // Classification stays here only to support cooldown/semaphore pacing,
+        // not to decide whether fallback is allowed.
+        const { cooldownMs } = checkFallbackError(
           result.status,
           errorText,
           0,
@@ -2002,7 +1998,6 @@ async function handleRoundRobinCombo({
           result.headers,
           profile
         );
-        const comboBadRequestFallback = shouldFallbackComboBadRequest(result.status, errorText);
 
         const isAllAccountsRateLimited = isAllAccountsRateLimitedResponse(
           result.status,
@@ -2018,31 +2013,14 @@ async function handleRoundRobinCombo({
 
         if (isAllAccountsRateLimited) {
           log.info(
-            "COMBO",
-            `All accounts rate-limited for ${modelStr}, falling back to next model`
-          );
-        } else if (!shouldFallback && !comboBadRequestFallback) {
-          log.warn("COMBO-RR", `${modelStr} failed (no fallback)`, { status: result.status });
-          recordComboRequest(combo.name, modelStr, {
-            success: false,
-            latencyMs: Date.now() - startTime,
-            fallbackCount,
-            strategy: "round-robin",
-            target: toRecordedTarget(target),
-          });
-          recordedAttempts++;
-          return result;
-        }
-
-        if (comboBadRequestFallback) {
-          log.info(
             "COMBO-RR",
-            `Treating provider-scoped 400 from ${modelStr} as model-local failure; trying next model`
+            `All accounts rate-limited for ${modelStr}, falling back to next model`
           );
         }
 
         // Transient error → retry same model
-        const isTransient = [408, 429, 500, 502, 503, 504].includes(result.status);
+        const isTransient =
+          !isStreamReadinessTimeout && [408, 429, 500, 502, 503, 504].includes(result.status);
         if (retry < maxRetries && isTransient) {
           continue;
         }
@@ -2067,7 +2045,21 @@ async function handleRoundRobinCombo({
             : 0;
         if ([502, 503, 504].includes(result.status) && fallbackWaitMs > 0) {
           log.info("COMBO-RR", `Waiting ${fallbackWaitMs}ms before fallback to next model`);
-          await new Promise((r) => setTimeout(r, fallbackWaitMs));
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, fallbackWaitMs);
+            signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve(undefined);
+              },
+              { once: true }
+            );
+          });
+          if (signal?.aborted) {
+            log.info("COMBO-RR", `Client disconnected during fallback wait — aborting`);
+            return errorResponse(499, "Client disconnected");
+          }
         }
 
         break;

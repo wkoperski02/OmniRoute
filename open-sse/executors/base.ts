@@ -13,10 +13,6 @@ import { getClaudeCodeCompatibleRequestDefaults } from "@/lib/providers/requestD
 import { supportsXHighEffort } from "../config/providerModels.ts";
 import { remapToolNamesInRequest } from "../services/claudeCodeToolRemapper.ts";
 import { obfuscateInBody } from "../services/claudeCodeObfuscation.ts";
-import {
-  computeFingerprint,
-  extractFirstUserMessageText,
-} from "../services/claudeCodeFingerprint.ts";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 
@@ -221,7 +217,12 @@ export class BaseExecutor {
     return baseUrls[urlIndex] || baseUrls[0] || this.config.baseUrl;
   }
 
-  buildHeaders(credentials: ProviderCredentials, stream = true): Record<string, string> {
+  buildHeaders(
+    credentials: ProviderCredentials,
+    stream = true,
+    clientHeaders?: Record<string, string> | null
+  ): Record<string, string> {
+    void clientHeaders;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...this.config.headers,
@@ -408,7 +409,7 @@ export class BaseExecutor {
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
       const url = this.buildUrl(model, stream, urlIndex, activeCredentials);
-      const headers = this.buildHeaders(activeCredentials, stream);
+      const headers = this.buildHeaders(activeCredentials, stream, clientHeaders);
       applyConfiguredUserAgent(headers, activeCredentials?.providerSpecificData);
 
       const ccRequestDefaults = isClaudeCodeCompatible(this.provider)
@@ -466,13 +467,33 @@ export class BaseExecutor {
           obfuscateInBody(tb);
 
           const ccVersion = "2.1.114";
-          const messages = tb.messages as Array<{ role?: string; content?: unknown }> | undefined;
-          const msgText = extractFirstUserMessageText(messages);
-          const fp = computeFingerprint(msgText, ccVersion);
+          // Fix #1638: Use a stable fingerprint instead of message-derived one.
+          // The original computeFingerprint() hashed first-user-message chars, which
+          // changes every conversation turn. This mutated the system[] prefix on each
+          // request, invalidating Anthropic's prompt-cache prefix and forcing ~100%
+          // cache_create (vs 96% cache_read with a stable prefix). Using a per-day
+          // hash keeps the billing header format while preserving cache affinity.
+          const dayStamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+          const fp = createHash("sha256")
+            .update(`${dayStamp}${ccVersion}`)
+            .digest("hex")
+            .slice(0, 3);
           const billingLine = `x-anthropic-billing-header: cc_version=${ccVersion}.${fp}; cc_entrypoint=cli; cch=00000;`;
 
           if (Array.isArray(tb.system)) {
             const sysBlocks = tb.system as Array<Record<string, unknown>>;
+            // Fix #1712: Remove any existing billing headers from the client
+            // to prevent stacking that breaks Anthropic prompt cache prefix matching.
+            for (let i = sysBlocks.length - 1; i >= 0; i--) {
+              const block = sysBlocks[i];
+              if (
+                block &&
+                typeof block.text === "string" &&
+                block.text.startsWith("x-anthropic-billing-header:")
+              ) {
+                sysBlocks.splice(i, 1);
+              }
+            }
             const firstSystemCacheControl =
               sysBlocks[0] &&
               typeof sysBlocks[0] === "object" &&

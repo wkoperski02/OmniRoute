@@ -38,7 +38,7 @@ const SENTINEL_CR_URL = `${CHATGPT_BASE}/backend-api/sentinel/chat-requirements`
 const CONV_URL = `${CHATGPT_BASE}/backend-api/f/conversation`;
 
 const CHATGPT_USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0";
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 // Captured from a real chatgpt.com browser session (April 2026).
 const OAI_CLIENT_VERSION = "prod-81e0c5cdf6140e8c5db714d613337f4aeab94029";
@@ -55,7 +55,9 @@ function deviceIdFor(cookie: string): string {
   if (!id) {
     // Synthesize a UUID v4-shaped string from a SHA-256 of the cookie. Stable,
     // deterministic per cookie, no PII (the cookie's already secret).
-    const h = createHash("sha256").update(cookie).digest("hex");
+    // Not a password hash — SHA-256 is used to derive a stable UUID from the
+    // session cookie for device-id fingerprinting. The output is a cache key.
+    const h = createHash("sha256").update(cookie).digest("hex"); // lgtm[js/insufficient-password-hash]
     id =
       `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-` +
       `${((parseInt(h.slice(16, 17), 16) & 0x3) | 0x8).toString(16)}${h.slice(17, 20)}-` +
@@ -122,7 +124,9 @@ function cookieKey(cookie: string): string {
   // birthday-paradox collision could surface one user's cached accessToken
   // to another's request. 64 bits is overkill for the 200-entry cache but
   // costs essentially nothing.
-  return createHash("sha256").update(cookie).digest("hex").slice(0, 16);
+  // Not a password hash — SHA-256 is used to derive a short, collision-resistant
+  // cache key from the session cookie. The output is a map lookup key.
+  return createHash("sha256").update(cookie).digest("hex").slice(0, 16); // lgtm[js/insufficient-password-hash]
 }
 
 function tokenLookup(cookie: string): TokenEntry | null {

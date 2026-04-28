@@ -44,9 +44,9 @@ test("usage service covers GitHub free-plan parsing, auth denial and unsupported
   assert.equal(freeUsage.quotas.chat.remaining, 20);
   assert.equal(freeUsage.quotas.completions.remainingPercentage, 80);
   assert.equal(calls[0].headers.Authorization, "token gho-free");
-  assert.equal(calls[0].headers["User-Agent"], "GitHubCopilotChat/0.38.0");
-  assert.equal(calls[0].headers["Editor-Version"], "vscode/1.110.0");
-  assert.equal(calls[0].headers["Editor-Plugin-Version"], "copilot-chat/0.38.0");
+  assert.equal(calls[0].headers["User-Agent"], "GitHubCopilotChat/0.45.1");
+  assert.equal(calls[0].headers["Editor-Version"], "vscode/1.117.0");
+  assert.equal(calls[0].headers["Editor-Plugin-Version"], "copilot-chat/0.45.1");
   assert.equal(calls[0].headers["X-GitHub-Api-Version"], "2025-04-01");
 
   globalThis.fetch = async () => new Response("forbidden", { status: 403 });
@@ -317,7 +317,7 @@ test("usage service covers Antigravity quota parsing, exclusions and forbidden a
   assert.equal(usage.quotas["gemini-open"].total, 0);
   assert.equal(usage.quotas["gemini-open"].remainingPercentage, 100);
   const loadCodeAssistCall = calls.find((call) => call.url.includes("loadCodeAssist"));
-  assert.equal(loadCodeAssistCall?.init.headers["User-Agent"], "google-api-nodejs-client/9.15.1");
+  assert.equal(loadCodeAssistCall?.init.headers["User-Agent"], "google-api-nodejs-client/10.3.0");
   assert.equal(
     loadCodeAssistCall?.init.headers["X-Goog-Api-Client"],
     "google-cloud-sdk vscode_cloudshelleditor/0.1"
@@ -943,6 +943,46 @@ test("usage service covers MiniMax usage parsing, documented endpoint fallback a
     apiKey: "bad-minimax-key",
   });
   assert.match(invalid.message, /Token Plan API key/i);
+});
+
+test("usage service treats MiniMax token-plan counts as used usage", async () => {
+  const beforeCall = Date.now();
+
+  globalThis.fetch = async (url, init = {}) => {
+    assert.equal(String(url), "https://www.minimax.io/v1/token_plan/remains");
+    assert.equal((init as any).headers.Authorization, "Bearer minimax-key");
+
+    return new Response(
+      JSON.stringify({
+        base_resp: { status_code: 0, status_msg: "ok" },
+        model_remains: [
+          {
+            model_name: "MiniMax-M2.7",
+            remains_time: 300_000,
+            current_interval_total_count: 15000,
+            current_interval_usage_count: 13,
+            current_weekly_total_count: 150000,
+            current_weekly_usage_count: 66,
+            weekly_remains_time: 604_800_000,
+          },
+        ],
+      }),
+      { status: 200 }
+    );
+  };
+
+  const usage: any = await usageService.getUsageForProvider({
+    provider: "minimax",
+    apiKey: "minimax-key",
+  });
+
+  assert.equal(usage.quotas["session (5h)"].used, 13);
+  assert.equal(usage.quotas["session (5h)"].remaining, 14987);
+  assert.equal(usage.quotas["session (5h)"].remainingPercentage, 99.91333333333333);
+  assert.equal(usage.quotas["weekly (7d)"].used, 66);
+  assert.equal(usage.quotas["weekly (7d)"].remaining, 149934);
+  assert.equal(usage.quotas["weekly (7d)"].remainingPercentage, 99.956);
+  assert.ok(Date.parse(usage.quotas["session (5h)"].resetAt) >= beforeCall + 240_000);
 });
 
 test("usage service parses Cursor team quotas and clamps on-demand ratio", async () => {

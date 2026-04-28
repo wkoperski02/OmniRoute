@@ -305,6 +305,9 @@ test("v1 models catalog exposes Antigravity client-visible preview aliases inste
   assert.ok(ids.has("antigravity/gemini-3-pro-preview"));
   assert.ok(ids.has("antigravity/gemini-3-flash-preview"));
   assert.equal(ids.has("antigravity/gemini-3.1-pro-high"), false);
+  assert.equal(ids.has("antigravity/gemini-claude-sonnet-4-5"), false);
+  assert.equal(ids.has("antigravity/gemini-claude-sonnet-4-5-thinking"), false);
+  assert.equal(ids.has("antigravity/gemini-claude-opus-4-5-thinking"), false);
 });
 
 test("v1 models catalog uses provider-node prefixes for compatible provider custom models", async () => {
@@ -461,7 +464,7 @@ test("v1 models catalog includes media, moderation, rerank, video, and music mod
   const byId = new Map(body.data.map((item) => [item.id, item]));
 
   assert.equal(response.status, 200);
-  assert.equal((byId.get("openai/gpt-image-1") as any).type, "image");
+  assert.equal((byId.get("openai/gpt-image-2") as any).type, "image");
   assert.equal((byId.get("openai/whisper-1") as any).type, "audio");
   assert.equal((byId.get("openai/whisper-1") as any).subtype, "transcription");
   assert.equal((byId.get("openai/omni-moderation-latest") as any).type, "moderation");
@@ -481,10 +484,10 @@ test("v1 models catalog exposes image model input and output modalities for adva
   const byId = new Map(body.data.map((item) => [item.id, item]));
 
   assert.equal(response.status, 200);
-  assert.deepEqual((byId as any).get("flux-redux")?.input_modalities, ["text", "image"]);
-  (assert as any).deepEqual((byId.get("flux-redux") as any).output_modalities, ["image"]);
-  (assert as any).equal((byId.get("flux-redux") as any).type, "image");
-  assert.ok((byId.get("flux-redux") as any).supported_sizes?.includes("1024x1024"));
+  assert.deepEqual((byId as any).get("flux-2-dev")?.input_modalities, ["text", "image"]);
+  (assert as any).deepEqual((byId.get("flux-2-dev") as any).output_modalities, ["image"]);
+  (assert as any).equal((byId.get("flux-2-dev") as any).type, "image");
+  assert.ok((byId.get("flux-2-dev") as any).supported_sizes?.includes("1024x1024"));
   (assert as any).deepEqual((byId.get("topaz/topaz-enhance") as any).input_modalities, ["image"]);
   assert.deepEqual((byId.get("topaz/topaz-enhance") as any).output_modalities, ["image"]);
 });
