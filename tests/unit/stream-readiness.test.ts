@@ -66,6 +66,18 @@ test("hasUsefulStreamContent detects text, reasoning, and tool deltas", () => {
     ),
     true
   );
+  assert.equal(
+    hasUsefulStreamContent(
+      `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "hello" })}\n\n`
+    ),
+    true
+  );
+  assert.equal(
+    hasUsefulStreamContent(
+      `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "hello" }] } }] } })}\n\n`
+    ),
+    true
+  );
 });
 
 test("ensureStreamReadiness preserves buffered chunks when stream starts", async () => {
@@ -88,7 +100,10 @@ test("ensureStreamReadiness preserves buffered chunks when stream starts", async
 
 test("ensureStreamReadiness returns 504 when no useful content arrives before timeout", async () => {
   const response = new Response(
-    streamFromChunks([": keepalive\n\n", `data: ${JSON.stringify({ type: "response.created" })}\n\n`], 20),
+    streamFromChunks(
+      [": keepalive\n\n", `data: ${JSON.stringify({ type: "response.created" })}\n\n`],
+      20
+    ),
     { status: 200, headers: { "Content-Type": "text/event-stream" } }
   );
 

@@ -18,10 +18,13 @@ export const HIDEABLE_SIDEBAR_ITEM_IDS = [
   "media",
   "search-tools",
   "logs",
+  "audit",
+  "webhooks",
   "health",
   "settings",
   "docs",
   "issues",
+  "changelog",
 ] as const;
 
 export type HideableSidebarItemId = (typeof HIDEABLE_SIDEBAR_ITEM_IDS)[number];
@@ -79,6 +82,8 @@ const DEBUG_SIDEBAR_ITEMS: readonly SidebarItemDefinition[] = [
 
 const SYSTEM_SIDEBAR_ITEMS: readonly SidebarItemDefinition[] = [
   { id: "logs", href: "/dashboard/logs", i18nKey: "logs", icon: "description" },
+  { id: "audit", href: "/dashboard/audit", i18nKey: "auditLog", icon: "policy" },
+  { id: "webhooks", href: "/dashboard/webhooks", i18nKey: "webhooks", icon: "webhook" },
   { id: "health", href: "/dashboard/health", i18nKey: "health", icon: "health_and_safety" },
   { id: "settings", href: "/dashboard/settings", i18nKey: "settings", icon: "settings" },
 ];
@@ -92,6 +97,7 @@ const HELP_SIDEBAR_ITEMS: readonly SidebarItemDefinition[] = [
     icon: "bug_report",
     external: true,
   },
+  { id: "changelog", href: "/dashboard/changelog", i18nKey: "changelog", icon: "campaign" },
 ];
 
 export const SIDEBAR_SECTIONS: readonly SidebarSectionDefinition[] = [

@@ -3,7 +3,6 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useNotificationStore } from "@/store/notificationStore";
-import PropTypes from "prop-types";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
@@ -460,7 +459,7 @@ interface CooldownTimerProps {
 
 function getModelSourceBadgeClass(source?: string): string {
   switch (normalizeModelCatalogSource(source)) {
-    case "api-sync":
+    case "imported":
       return "border-sky-500/30 bg-sky-500/10 text-sky-300";
     case "custom":
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
@@ -1041,12 +1040,12 @@ export default function ProviderDetailPage() {
   const isOAuth = providerSupportsOAuth && !providerSupportsPat;
   const registryModels = getModelsByProviderId(providerId);
   // Prefer synced API-discovered models when available, then merge built-ins
-  // and user-managed custom/imported models without duplicating IDs.
+  // and user-managed custom models without duplicating IDs.
   const models = useMemo(() => {
     if (providerId === "gemini") {
       return syncedAvailableModels.map((model: any) => ({
         ...model,
-        source: model?.source === "api-sync" ? "api-sync" : "api-sync",
+        source: "imported",
       }));
     }
 
@@ -1061,7 +1060,7 @@ export default function ProviderDetailPage() {
       .map((model: any) => ({
         id: model.id,
         name: model.name || model.id,
-        source: "api-sync",
+        source: "imported",
       }));
     const knownIds = new Set([...registryIds, ...syncedExtras.map((model: any) => model.id)]);
     const customExtras = modelMeta.customModels
@@ -1069,7 +1068,7 @@ export default function ProviderDetailPage() {
       .map((cm: any) => ({
         id: cm.id,
         name: cm.name || cm.id,
-        source: cm.source === "api-sync" ? "api-sync" : "custom",
+        source: normalizeModelCatalogSource(cm.source) === "imported" ? "imported" : "custom",
       }));
     return [...builtInModels, ...syncedExtras, ...customExtras];
   }, [providerId, registryModels, syncedAvailableModels, modelMeta.customModels]);
@@ -2097,6 +2096,9 @@ export default function ProviderDetailPage() {
         typeof data.importedChanges?.total === "number"
           ? data.importedChanges.total
           : importedCount;
+      const totalChangedCount =
+        changedCount +
+        (typeof data.customModelChanges?.total === "number" ? data.customModelChanges.total : 0);
 
       if (importedModels.length === 0) {
         setImportProgress((prev) => ({
@@ -2113,7 +2115,7 @@ export default function ProviderDetailPage() {
           ],
           importedCount,
         }));
-        if (changedCount > 0) {
+        if (totalChangedCount > 0) {
           setTimeout(() => {
             window.location.reload();
           }, 2000);
@@ -2142,7 +2144,7 @@ export default function ProviderDetailPage() {
         importedCount,
       }));
 
-      if (changedCount > 0) {
+      if (totalChangedCount > 0) {
         setTimeout(() => {
           window.location.reload();
         }, 2000);
@@ -2730,7 +2732,7 @@ export default function ProviderDetailPage() {
 
       {isCompatible && providerNode && (
         <Card>
-          <div className="flex items-center justify-between mb-4">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-lg font-semibold">
                 {isCcCompatible
@@ -2743,7 +2745,7 @@ export default function ProviderDetailPage() {
                 {getApiLabel()} · {(providerNode.baseUrl || "").replace(/\/$/, "")}/{getApiPath()}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" icon="add" onClick={() => setShowAddApiKeyModal(true)}>
                 {t("add")}
               </Button>
@@ -2788,6 +2790,16 @@ export default function ProviderDetailPage() {
               </Button>
             </div>
           </div>
+          {isCcCompatible && (
+            <div className="mb-4 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-text-muted">
+              <div className="flex items-start gap-2">
+                <span className="material-symbols-outlined mt-0.5 text-[18px] text-amber-500">
+                  warning
+                </span>
+                <p>{t("ccCompatibleValidationHint")}</p>
+              </div>
+            </div>
+          )}
         </Card>
       )}
 
@@ -3525,12 +3537,12 @@ function ModelRow({
             className={`rounded p-0.5 hover:bg-sidebar transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${testStatus === "ok" ? "text-green-500" : testStatus === "error" ? "text-red-500" : "text-text-muted hover:text-primary"}`}
             title={
               testingModel
-                ? t("testingModel", "Testing...")
+                ? t("testingModel")
                 : testStatus === "ok"
                   ? "OK"
                   : testStatus === "error"
                     ? "Error"
-                    : t("testModel", "Test Model")
+                    : t("testModel")
             }
           >
             {testingModel ? (
@@ -3577,23 +3589,6 @@ function ModelRow({
     </div>
   );
 }
-
-ModelRow.propTypes = {
-  model: PropTypes.shape({
-    id: PropTypes.string.isRequired,
-  }).isRequired,
-  fullModel: PropTypes.string.isRequired,
-  provider: PropTypes.string.isRequired,
-  copied: PropTypes.string,
-  onCopy: PropTypes.func.isRequired,
-  t: PropTypes.func,
-  showDeveloperToggle: PropTypes.bool,
-  effectiveModelNormalize: PropTypes.func.isRequired,
-  effectiveModelPreserveDeveloper: PropTypes.func.isRequired,
-  getUpstreamHeadersRecord: PropTypes.func.isRequired,
-  saveModelCompatFlags: PropTypes.func.isRequired,
-  compatDisabled: PropTypes.bool,
-};
 
 function ModelVisibilityToolbar({
   t,
@@ -3829,27 +3824,6 @@ function PassthroughModelsSection({
   );
 }
 
-PassthroughModelsSection.propTypes = {
-  providerAlias: PropTypes.string.isRequired,
-  modelAliases: PropTypes.object.isRequired,
-  customModels: PropTypes.array,
-  copied: PropTypes.string,
-  onCopy: PropTypes.func.isRequired,
-  onSetAlias: PropTypes.func.isRequired,
-  onDeleteAlias: PropTypes.func.isRequired,
-  t: PropTypes.func.isRequired,
-  effectiveModelNormalize: PropTypes.func.isRequired,
-  effectiveModelPreserveDeveloper: PropTypes.func.isRequired,
-  getUpstreamHeadersRecord: PropTypes.func.isRequired,
-  saveModelCompatFlags: PropTypes.func.isRequired,
-  compatSavingModelId: PropTypes.string,
-  isModelHidden: PropTypes.func.isRequired,
-  onToggleHidden: PropTypes.func.isRequired,
-  onBulkToggleHidden: PropTypes.func.isRequired,
-  bulkTogglePending: PropTypes.bool,
-  togglingModelId: PropTypes.string,
-};
-
 function PassthroughModelRow({
   modelId,
   fullModel,
@@ -3911,12 +3885,12 @@ function PassthroughModelRow({
             className={`rounded p-0.5 hover:bg-sidebar transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${testStatus === "ok" ? "text-green-500" : testStatus === "error" ? "text-red-500" : "text-text-muted hover:text-primary"}`}
             title={
               testingModel
-                ? t("testingModel", "Testing...")
+                ? t("testingModel")
                 : testStatus === "ok"
                   ? "OK"
                   : testStatus === "error"
                     ? "Error"
-                    : t("testModel", "Test Model")
+                    : t("testModel")
             }
           >
             {testingModel ? (
@@ -3970,25 +3944,6 @@ function PassthroughModelRow({
     </div>
   );
 }
-
-PassthroughModelRow.propTypes = {
-  modelId: PropTypes.string.isRequired,
-  fullModel: PropTypes.string.isRequired,
-  source: PropTypes.string,
-  isHidden: PropTypes.bool,
-  copied: PropTypes.string,
-  onCopy: PropTypes.func.isRequired,
-  onDeleteAlias: PropTypes.func.isRequired,
-  t: PropTypes.func,
-  showDeveloperToggle: PropTypes.bool,
-  effectiveModelNormalize: PropTypes.func.isRequired,
-  effectiveModelPreserveDeveloper: PropTypes.func.isRequired,
-  getUpstreamHeadersRecord: PropTypes.func.isRequired,
-  saveModelCompatFlags: PropTypes.func.isRequired,
-  compatDisabled: PropTypes.bool,
-  onToggleHidden: PropTypes.func,
-  togglingHidden: PropTypes.bool,
-};
 
 // ============ Custom Models Section (for ALL providers) ============
 
@@ -4503,14 +4458,6 @@ function CustomModelsSection({
   );
 }
 
-CustomModelsSection.propTypes = {
-  providerId: PropTypes.string.isRequired,
-  providerAlias: PropTypes.string.isRequired,
-  copied: PropTypes.string,
-  onCopy: PropTypes.func.isRequired,
-  onModelsChanged: PropTypes.func,
-};
-
 function CompatibleModelsSection({
   providerStorageAlias,
   providerDisplayAlias,
@@ -4798,42 +4745,6 @@ function CompatibleModelsSection({
   );
 }
 
-CompatibleModelsSection.propTypes = {
-  providerStorageAlias: PropTypes.string.isRequired,
-  providerDisplayAlias: PropTypes.string.isRequired,
-  modelAliases: PropTypes.object.isRequired,
-  customModels: PropTypes.array,
-  fallbackModels: PropTypes.array,
-  description: PropTypes.string.isRequired,
-  inputLabel: PropTypes.string.isRequired,
-  inputPlaceholder: PropTypes.string.isRequired,
-  copied: PropTypes.string,
-  onCopy: PropTypes.func.isRequired,
-  onSetAlias: PropTypes.func.isRequired,
-  onDeleteAlias: PropTypes.func.isRequired,
-  connections: PropTypes.arrayOf(
-    PropTypes.shape({
-      id: PropTypes.string,
-      isActive: PropTypes.bool,
-    })
-  ).isRequired,
-  isAnthropic: PropTypes.bool,
-  onImportWithProgress: PropTypes.func.isRequired,
-  t: PropTypes.func.isRequired,
-  effectiveModelNormalize: PropTypes.func.isRequired,
-  effectiveModelPreserveDeveloper: PropTypes.func.isRequired,
-  getUpstreamHeadersRecord: PropTypes.func.isRequired,
-  saveModelCompatFlags: PropTypes.func.isRequired,
-  compatSavingModelId: PropTypes.string,
-  onModelsChanged: PropTypes.func,
-  allowImport: PropTypes.bool.isRequired,
-  isModelHidden: PropTypes.func.isRequired,
-  onToggleHidden: PropTypes.func.isRequired,
-  onBulkToggleHidden: PropTypes.func.isRequired,
-  bulkTogglePending: PropTypes.bool,
-  togglingModelId: PropTypes.string,
-};
-
 function CooldownTimer({ until }: CooldownTimerProps) {
   const [remaining, setRemaining] = useState("");
 
@@ -4865,10 +4776,6 @@ function CooldownTimer({ until }: CooldownTimerProps) {
 
   return <span className="text-xs text-orange-500 font-mono">⏱ {remaining}</span>;
 }
-
-CooldownTimer.propTypes = {
-  until: PropTypes.string.isRequired,
-};
 
 const ERROR_TYPE_LABELS = {
   runtime_error: { labelKey: "errorTypeRuntime", variant: "warning" },
@@ -5456,50 +5363,6 @@ function ConnectionRow({
   );
 }
 
-ConnectionRow.propTypes = {
-  connection: PropTypes.shape({
-    id: PropTypes.string,
-    name: PropTypes.string,
-    email: PropTypes.string,
-    displayName: PropTypes.string,
-    rateLimitedUntil: PropTypes.string,
-    rateLimitProtection: PropTypes.bool,
-    testStatus: PropTypes.string,
-    isActive: PropTypes.bool,
-    priority: PropTypes.number,
-    lastError: PropTypes.string,
-    lastErrorType: PropTypes.string,
-    lastErrorSource: PropTypes.string,
-    errorCode: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
-    globalPriority: PropTypes.number,
-    providerSpecificData: PropTypes.object,
-  }).isRequired,
-  isOAuth: PropTypes.bool.isRequired,
-  isClaude: PropTypes.bool,
-  isCodex: PropTypes.bool,
-  isFirst: PropTypes.bool.isRequired,
-  isLast: PropTypes.bool.isRequired,
-  onMoveUp: PropTypes.func.isRequired,
-  onMoveDown: PropTypes.func.isRequired,
-  onToggleActive: PropTypes.func.isRequired,
-  onToggleRateLimit: PropTypes.func.isRequired,
-  onToggleClaudeExtraUsage: PropTypes.func,
-  onToggleCodex5h: PropTypes.func,
-  onToggleCodexWeekly: PropTypes.func,
-  isCcCompatible: PropTypes.bool,
-  cliproxyapiEnabled: PropTypes.bool,
-  onToggleCliproxyapiMode: PropTypes.func,
-  onRetest: PropTypes.func.isRequired,
-  isRetesting: PropTypes.bool,
-  onEdit: PropTypes.func.isRequired,
-  onDelete: PropTypes.func.isRequired,
-  onReauth: PropTypes.func,
-  onApplyCodexAuthLocal: PropTypes.func,
-  isApplyingCodexAuthLocal: PropTypes.bool,
-  onExportCodexAuthFile: PropTypes.func,
-  isExportingCodexAuthFile: PropTypes.bool,
-};
-
 const CONFIGURABLE_BASE_URL_PROVIDERS = new Set([
   "azure-openai",
   "bailian-coding-plan",
@@ -5514,7 +5377,7 @@ const CONFIGURABLE_BASE_URL_PROVIDERS = new Set([
 const DEFAULT_PROVIDER_BASE_URLS: Record<string, string> = {
   "azure-openai": "https://example-resource.openai.azure.com",
   "bailian-coding-plan": "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
-  "xiaomi-mimo": "https://token-plan-ams.xiaomimimo.com/v1",
+  "xiaomi-mimo": "https://token-plan-sgp.xiaomimimo.com/v1",
   "searxng-search": "http://localhost:8888/search",
   petals: "https://chat.petals.dev/api/v1/generate",
 };
@@ -5772,6 +5635,7 @@ function AddApiKeyModal({
       }
 
       let isValid = false;
+      let validationError: string | null = null;
       try {
         setValidating(true);
         setValidationResult(null);
@@ -5789,6 +5653,9 @@ function AddApiKeyModal({
         });
         const data = await res.json();
         isValid = !!data.valid;
+        if (!isValid && data.error) {
+          validationError = data.error;
+        }
         setValidationResult(isValid ? "success" : "failed");
       } catch {
         setValidationResult("failed");
@@ -5797,8 +5664,13 @@ function AddApiKeyModal({
       }
 
       if (!isValid) {
-        setSaveError(t("apiKeyValidationFailed"));
-        return;
+        if (apiKeyOptional && !formData.apiKey) {
+          // Bypass validation block for local/optional providers when no key is provided
+          console.debug("Validation failed but apiKey is optional; proceeding to save.");
+        } else {
+          setSaveError(validationError || t("apiKeyValidationFailed"));
+          return;
+        }
       }
 
       const providerSpecificData: Record<string, unknown> = {};
@@ -5860,6 +5732,16 @@ function AddApiKeyModal({
       onClose={onClose}
     >
       <div className="flex flex-col gap-4">
+        {isCcCompatible && (
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-text-muted">
+            <div className="flex items-start gap-2">
+              <span className="material-symbols-outlined mt-0.5 text-[18px] text-amber-500">
+                warning
+              </span>
+              <p>{t("ccCompatibleValidationHint")}</p>
+            </div>
+          </div>
+        )}
         <Input
           label={t("nameLabel")}
           value={formData.name}
@@ -5920,17 +5802,15 @@ function AddApiKeyModal({
             />
           </div>
         )}
-        {isCompatible && (
+        {isCompatible && !isCcCompatible && (
           <p className="text-xs text-text-muted">
-            {isCcCompatible
-              ? t("ccCompatibleValidationHint")
-              : isAnthropic
-                ? t("validationChecksAnthropicCompatible", {
-                    provider: providerName || t("anthropicCompatibleName"),
-                  })
-                : t("validationChecksOpenAiCompatible", {
-                    provider: providerName || t("openaiCompatibleName"),
-                  })}
+            {isAnthropic
+              ? t("validationChecksAnthropicCompatible", {
+                  provider: providerName || t("anthropicCompatibleName"),
+                })
+              : t("validationChecksOpenAiCompatible", {
+                  provider: providerName || t("openaiCompatibleName"),
+                })}
           </p>
         )}
         <button
@@ -6073,17 +5953,6 @@ function AddApiKeyModal({
     </Modal>
   );
 }
-
-AddApiKeyModal.propTypes = {
-  isOpen: PropTypes.bool.isRequired,
-  provider: PropTypes.string,
-  providerName: PropTypes.string,
-  isCompatible: PropTypes.bool,
-  isAnthropic: PropTypes.bool,
-  isCcCompatible: PropTypes.bool,
-  onSave: PropTypes.func.isRequired,
-  onClose: PropTypes.func.isRequired,
-};
 
 function normalizeAndValidateHttpBaseUrl(rawValue, fallbackUrl) {
   const value = (typeof rawValue === "string" ? rawValue.trim() : "") || fallbackUrl;
@@ -6830,20 +6699,6 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
   );
 }
 
-EditConnectionModal.propTypes = {
-  isOpen: PropTypes.bool.isRequired,
-  connection: PropTypes.shape({
-    id: PropTypes.string,
-    name: PropTypes.string,
-    email: PropTypes.string,
-    priority: PropTypes.number,
-    authType: PropTypes.string,
-    provider: PropTypes.string,
-  }),
-  onSave: PropTypes.func.isRequired,
-  onClose: PropTypes.func.isRequired,
-};
-
 function EditCompatibleNodeModal({
   isOpen,
   node,
@@ -6959,6 +6814,16 @@ function EditCompatibleNodeModal({
       onClose={onClose}
     >
       <div className="flex flex-col gap-4">
+        {isCcCompatible && (
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-text-muted">
+            <div className="flex items-start gap-2">
+              <span className="material-symbols-outlined mt-0.5 text-[18px] text-amber-500">
+                warning
+              </span>
+              <p>{t("ccCompatibleValidationHint")}</p>
+            </div>
+          </div>
+        )}
         <Input
           label={t("nameLabel")}
           value={formData.name}
@@ -7094,20 +6959,3 @@ function EditCompatibleNodeModal({
     </Modal>
   );
 }
-
-EditCompatibleNodeModal.propTypes = {
-  isOpen: PropTypes.bool.isRequired,
-  node: PropTypes.shape({
-    id: PropTypes.string,
-    name: PropTypes.string,
-    prefix: PropTypes.string,
-    apiType: PropTypes.string,
-    baseUrl: PropTypes.string,
-    chatPath: PropTypes.string,
-    modelsPath: PropTypes.string,
-  }),
-  onSave: PropTypes.func.isRequired,
-  onClose: PropTypes.func.isRequired,
-  isAnthropic: PropTypes.bool,
-  isCcCompatible: PropTypes.bool,
-};

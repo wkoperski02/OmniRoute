@@ -1,5 +1,6 @@
 import crypto, { randomUUID } from "crypto";
 import { BaseExecutor, mergeUpstreamExtraHeaders, type ExecuteInput } from "./base.ts";
+import { applyFingerprint, isCliCompatEnabled } from "../config/cliFingerprints.ts";
 import { PROVIDERS, OAUTH_ENDPOINTS, HTTP_STATUS } from "../config/constants.ts";
 import { scrubProxyAndFingerprintHeaders } from "../services/antigravityHeaderScrub.ts";
 import { antigravityUserAgent } from "../services/antigravityHeaders.ts";
@@ -26,6 +27,31 @@ const LONG_RETRY_THRESHOLD_MS = 60_000;
 const CREDITS_EXHAUSTED_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours
 
 const BARE_PRO_IDS = new Set(["gemini-3.1-pro"]);
+
+function cloneAntigravityRequestBody(body: unknown): unknown {
+  if (!body || typeof body !== "object") {
+    return body;
+  }
+
+  try {
+    return structuredClone(body);
+  } catch {
+    return JSON.parse(JSON.stringify(body));
+  }
+}
+
+function serializeAntigravityRequest(
+  provider: string,
+  headers: Record<string, string>,
+  body: unknown
+): { headers: Record<string, string>; bodyString: string } {
+  const serializedBody = cloneAntigravityRequestBody(body);
+
+  if (!isCliCompatEnabled(provider)) {
+    return { headers, bodyString: JSON.stringify(serializedBody) };
+  }
+  return applyFingerprint(provider, { ...headers }, serializedBody);
+}
 
 type AntigravityCollectedStream = {
   textContent: string;
@@ -573,10 +599,17 @@ export class AntigravityExecutor extends BaseExecutor {
       }
 
       try {
+        const serializedRequest = serializeAntigravityRequest(
+          this.provider,
+          headers,
+          transformedBody
+        );
+        const finalHeaders = serializedRequest.headers;
+
         const response = await fetch(url, {
           method: "POST",
-          headers,
-          body: JSON.stringify(transformedBody),
+          headers: finalHeaders,
+          body: serializedRequest.bodyString,
           signal,
         });
 
@@ -626,11 +659,17 @@ export class AntigravityExecutor extends BaseExecutor {
               ) {
                 log?.info?.("AG_CREDITS", "Retrying with Google One AI credits");
                 const creditsBody = injectCreditsField(transformedBody);
+                const serializedCreditsRequest = serializeAntigravityRequest(
+                  this.provider,
+                  headers,
+                  creditsBody
+                );
+                const finalCreditsHeaders = serializedCreditsRequest.headers;
                 try {
                   const creditsResp = await fetch(url, {
                     method: "POST",
-                    headers,
-                    body: JSON.stringify(creditsBody),
+                    headers: finalCreditsHeaders,
+                    body: serializedCreditsRequest.bodyString,
                     signal,
                   });
                   if (creditsResp.ok || creditsResp.status !== HTTP_STATUS.RATE_LIMITED) {
@@ -640,7 +679,7 @@ export class AntigravityExecutor extends BaseExecutor {
                         creditsResp,
                         model,
                         url,
-                        headers,
+                        finalCreditsHeaders,
                         creditsBody,
                         log,
                         signal
@@ -668,7 +707,7 @@ export class AntigravityExecutor extends BaseExecutor {
                     return {
                       response: creditsResp,
                       url,
-                      headers,
+                      headers: finalCreditsHeaders,
                       transformedBody: attachToolNameMap(creditsBody, requestToolNameMap),
                     };
                   }
@@ -769,7 +808,7 @@ export class AntigravityExecutor extends BaseExecutor {
             return {
               response: modifiedResponse,
               url,
-              headers,
+              headers: finalHeaders,
               transformedBody: attachToolNameMap(transformedBody, requestToolNameMap),
             };
           } catch (err) {
@@ -785,7 +824,7 @@ export class AntigravityExecutor extends BaseExecutor {
             response,
             model,
             url,
-            headers,
+            finalHeaders,
             transformedBody,
             log,
             signal
@@ -898,7 +937,7 @@ export class AntigravityExecutor extends BaseExecutor {
           return {
             response: tappedResponse,
             url,
-            headers,
+            headers: finalHeaders,
             transformedBody: attachToolNameMap(transformedBody, requestToolNameMap),
           };
         }
@@ -906,7 +945,7 @@ export class AntigravityExecutor extends BaseExecutor {
         return {
           response,
           url,
-          headers,
+          headers: finalHeaders,
           transformedBody: attachToolNameMap(transformedBody, requestToolNameMap),
         };
       } catch (error) {
